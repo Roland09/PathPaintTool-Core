@@ -52,9 +52,24 @@ namespace UnityEditor.Experimental.TerrainAPI
             return m_Material;
         }
 
+        enum PaintMode
+        {
+            /// <summary>
+            /// Paint via dragging the mouse
+            /// </summary>
+            Paint,
+
+            /// <summary>
+            /// Similar to Bridge Tool, but uses the last click position as source for the next bridge
+            /// </summary>
+            Stroke
+        }
+
         [System.Serializable]
         class PathToolSerializedProperties
         {
+            public PaintMode paintMode;
+
             public AnimationCurve widthProfile;
             public AnimationCurve heightProfile;
             public AnimationCurve strengthProfile;
@@ -62,6 +77,8 @@ namespace UnityEditor.Experimental.TerrainAPI
 
             public void SetDefaults()
             {
+                paintMode = PaintMode.Paint;
+
                 widthProfile = AnimationCurve.Linear(0, 1, 1, 1);
                 heightProfile = AnimationCurve.Linear(0, 0, 1, 0);
                 strengthProfile = AnimationCurve.Linear(0, 1, 1, 1);
@@ -78,7 +95,7 @@ namespace UnityEditor.Experimental.TerrainAPI
 
         public override string GetDesc()
         {
-            return "Paint mode: drag brush to paint a path. Stroke mode: Control + Click to Set the first start point, click to connect the path.";
+            return "Paint Mode: drag brush to paint a path.\nStroke Mode: Control + Click to Set the first start point, click to connect the path.";
         }
 
         public override void OnEnterToolMode() {
@@ -120,16 +137,28 @@ namespace UnityEditor.Experimental.TerrainAPI
                 return;
             }
 
-            //display a brush preview at the path starting location, using starting size from width profile
-            if (m_StartTerrain != null)
+            switch (pathToolProperties.paintMode)
             {
-                float startWidth = Mathf.Abs(pathToolProperties.widthProfile.Evaluate(0.0f));
+                case PaintMode.Paint:
+                    // nothing to do, no special indicator
+                    break;
 
-                BrushTransform brushTransform = TerrainPaintUtility.CalculateBrushTransform(m_StartTerrain, m_StartPoint, commonUI.brushSize * startWidth, commonUI.brushRotation);
-                PaintContext sampleContext = TerrainPaintUtility.BeginPaintHeightmap(m_StartTerrain, brushTransform.GetBrushXYBounds());
-                TerrainPaintUtilityEditor.DrawBrushPreview(sampleContext, TerrainPaintUtilityEditor.BrushPreview.SourceRenderTexture,
-                                                           editContext.brushTexture, brushTransform, TerrainPaintUtilityEditor.GetDefaultBrushPreviewMaterial(), 0);
-                TerrainPaintUtility.ReleaseContextResources(sampleContext);
+                case PaintMode.Stroke:
+                    //display a brush preview at first or last clicked path location, using starting size from width profile
+                    if (m_StartTerrain != null)
+                    {
+                        float startWidth = Mathf.Abs(pathToolProperties.widthProfile.Evaluate(0.0f));
+
+                        BrushTransform brushTransform = TerrainPaintUtility.CalculateBrushTransform(m_StartTerrain, m_StartPoint, commonUI.brushSize * startWidth, commonUI.brushRotation);
+                        PaintContext sampleContext = TerrainPaintUtility.BeginPaintHeightmap(m_StartTerrain, brushTransform.GetBrushXYBounds());
+                        TerrainPaintUtilityEditor.DrawBrushPreview(sampleContext, TerrainPaintUtilityEditor.BrushPreview.SourceRenderTexture,
+                                                                   editContext.brushTexture, brushTransform, TerrainPaintUtilityEditor.GetDefaultBrushPreviewMaterial(), 0);
+                        TerrainPaintUtility.ReleaseContextResources(sampleContext);
+                    }
+                    break;
+
+                default:
+                    throw new System.Exception(string.Format("Unsupported paint mode {0}", pathToolProperties.paintMode));
             }
         }
 
@@ -150,6 +179,9 @@ namespace UnityEditor.Experimental.TerrainAPI
             m_ShowPathControls = TerrainToolGUIHelper.DrawHeaderFoldoutForBrush(Styles.controlHeader, m_ShowPathControls, pathToolProperties.SetDefaults);
 
             if (m_ShowPathControls) {
+
+                pathToolProperties.paintMode = (PaintMode)EditorGUILayout.EnumPopup(Styles.paintModeContent, pathToolProperties.paintMode);
+
                 //"Controls the width of the path over the length of the stroke"
                 pathToolProperties.widthProfile = EditorGUILayout.CurveField(Styles.widthProfileContent, pathToolProperties.widthProfile);
                 pathToolProperties.heightProfile = EditorGUILayout.CurveField(Styles.heightProfileContent, pathToolProperties.heightProfile);
@@ -193,7 +225,21 @@ namespace UnityEditor.Experimental.TerrainAPI
 
             Vector3 stroke = targetPos - m_StartPoint;
             float strokeLength = stroke.magnitude;
-            int numSplats = (int)(strokeLength / (0.1f * Mathf.Max(brushSpacing, 0.01f)));
+            int numSplats;
+
+            switch( pathToolProperties.paintMode)
+            {
+                case PaintMode.Paint:
+                    numSplats = 1;
+                    break;
+
+                case PaintMode.Stroke:
+                    numSplats = (int)(strokeLength / (0.1f * Mathf.Max(brushSpacing, 0.01f)));
+                    break;
+
+                default:
+                    throw new System.Exception( string.Format("Unsupported paint mode {0}", pathToolProperties.paintMode));
+            }
 
             Terrain currTerrain = m_StartTerrain;
             Material mat = GetPaintMaterial();
@@ -204,8 +250,6 @@ namespace UnityEditor.Experimental.TerrainAPI
 
             Vector2 jitterVec = new Vector2(-stroke.z, stroke.x); //perpendicular to stroke direction
             jitterVec.Normalize();
-
-            
 
             for (int i = 0; i < numSplats; i++)
             {
@@ -291,19 +335,71 @@ namespace UnityEditor.Experimental.TerrainAPI
                 m_StartTerrain = terrain;
                 return true;
             }
-            else if (!m_StartTerrain || (Event.current.type == EventType.MouseDrag)) {
+            else if (!m_StartTerrain) {
                 return true;
             }
-            else
+
+            switch (pathToolProperties.paintMode)
             {
-                ApplyBrushInternal(terrain, uv, editContext.brushTexture, commonUI.brushSpacing);
-                return false;
+                case PaintMode.Paint:
+                    if (Event.current.type == EventType.MouseUp)
+                    {
+                        m_StartTerrain = null;
+                        return true;
+                    }
+                    else if (Event.current.type == EventType.MouseDown)
+                    {
+                        UpdateStartPoint(terrain, uv);
+                        return true;
+                    }
+                    else if (Event.current.type == EventType.MouseDrag)
+                    {
+
+                        ApplyBrushInternal(terrain, uv, editContext.brushTexture, commonUI.brushSpacing);
+
+                        UpdateStartPoint(terrain, uv);
+                        return false;
+                    }
+                    else
+                    {
+
+                        ApplyBrushInternal(terrain, uv, editContext.brushTexture, commonUI.brushSpacing);
+                        return false;
+                    }
+
+                case PaintMode.Stroke:
+                    if (Event.current.type == EventType.MouseDown)
+                    {
+                        ApplyBrushInternal(terrain, uv, editContext.brushTexture, commonUI.brushSpacing);
+
+                        UpdateStartPoint(terrain, uv);
+
+                        return false;
+                    }
+                    break;
+
+                default:
+                    throw new System.Exception(string.Format("Unsupported paint mode {0}", pathToolProperties.paintMode));
             }
+
+            return false;
+        }
+
+        void UpdateStartPoint(Terrain terrain, Vector2 uv)
+        {
+            TerrainData terrainData = terrain.terrainData;
+            float height = terrainData.GetInterpolatedHeight(uv.x, uv.y) / terrainData.size.y;
+
+            m_StartPoint = new Vector3(uv.x, uv.y, height);
+            m_StartTerrain = terrain;
         }
 
         private static class Styles
         {
             public static readonly GUIContent controlHeader = EditorGUIUtility.TrTextContent("Path Tool Controls");
+
+            public static readonly GUIContent paintModeContent = EditorGUIUtility.TrTextContent("Paint Mode", "Paint via drag or click");
+
             public static readonly GUIContent widthProfileContent = EditorGUIUtility.TrTextContent("Width Profile", "A multiplier that controls the width of the path over the length of the stroke");
             public static readonly GUIContent heightProfileContent = EditorGUIUtility.TrTextContent("Height Offset Profile", "Adds a height offset to the path along the length of the stroke (World Units)");
             public static readonly GUIContent strengthProfileContent = EditorGUIUtility.TrTextContent("Strength Profile", "A multiplier that controls influence of the path along the length of the stroke");
