@@ -335,9 +335,6 @@ namespace UnityEditor.Experimental.TerrainAPI
                 m_StartTerrain = terrain;
                 return true;
             }
-            else if (!m_StartTerrain) {
-                return true;
-            }
 
             switch (pathToolProperties.paintMode)
             {
